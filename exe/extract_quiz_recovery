@@ -1,0 +1,118 @@
+#!/usr/bin/env ruby
+
+require "fileutils"
+require "json"
+require "time"
+
+class ExtractLearnerAnswersByAttempt
+  INSERT_LEARNER_ANSWER_REGEX = /INSERT INTO "learner_answers".+RETURNING "id"\s+\[(.+)\]/
+  INSERT_QUIZ_ATTEMPT_REGEX = /INSERT INTO "quiz_attempts".+RETURNING "id"/
+  SELECT_QUIZ_ATTEMPT_REGEX = /SELECT\s+"quiz_attempts"\.\* FROM "quiz_attempts" WHERE "quiz_attempts"\."\w+_id" = \d+ AND "quiz_attempts"\."\w+_id" = \d+ AND "quiz_attempts"\."\w+_id" = \d+\s+ORDER BY.+DESC LIMIT 1/
+
+  QUIZ_RECOVERY_PATH = File.expand_path("../../quiz_recovery", __FILE__)
+  QUIZ_RECOVERY_DATA_PATH = File.expand_path("../../quiz_recovery/data", __FILE__)
+
+  def run!
+    cleanup!
+    ensure_dir_structure!
+
+    process_lines!
+  end
+
+  private
+
+  def cleanup!
+    FileUtils.rm_rf(QUIZ_RECOVERY_DATA_PATH)
+  end
+
+  def ensure_dir_structure!
+    FileUtils.mkdir_p(QUIZ_RECOVERY_PATH)
+    FileUtils.mkdir_p(QUIZ_RECOVERY_DATA_PATH)
+  end
+
+  def process_lines!
+    ARGF.each do |line|
+      columns = line.split("\t")
+      timestamp_column = columns[0]
+      datetime_column = columns[1]
+      ip_column = columns[5]
+      sql_column = columns[9]
+
+      process_select_quiz_attempts!(line, datetime_column, timestamp_column, ip_column, sql_column)
+      process_insert_quiz_attempts!(line, datetime_column, timestamp_column, ip_column, sql_column)
+      process_insert_learner_answers!(line, datetime_column, timestamp_column, ip_column, sql_column)
+    end
+  end
+
+  def process_select_quiz_attempts!(line, datetime_column, timestamp_column, ip_column, sql_column)
+    matches = sql_column.match(SELECT_QUIZ_ATTEMPT_REGEX)
+    if matches
+      File.open("#{QUIZ_RECOVERY_DATA_PATH}/select_quiz_attempts.log", "a") do |file|
+        file.puts line
+      end
+    end
+  end
+
+  def process_insert_quiz_attempts!(line, datetime_column, timestamp_column, ip_column, sql_column)
+    matches = sql_column.match(INSERT_QUIZ_ATTEMPT_REGEX)
+    if matches
+      File.open("#{QUIZ_RECOVERY_DATA_PATH}/insert_quiz_attempts.log", "a") do |file|
+        file.puts line
+      end
+    end
+  end
+
+  def process_insert_learner_answers!(line, datetime_column, timestamp_column, ip_column, sql_column)
+    matches = line.match(INSERT_LEARNER_ANSWER_REGEX)
+    if matches
+      sql_data = parse_insert_learner_answers_column_name_value_pairs(matches[1])
+      answers_for_attempt_path = "#{QUIZ_RECOVERY_DATA_PATH}/#{sql_data["quiz_attempt_id"]}"
+
+      unless Dir.exists?(answers_for_attempt_path)
+        FileUtils.mkdir_p(answers_for_attempt_path)
+      end
+      File.open("#{answers_for_attempt_path}/learner_answers.log", "a") do |file|
+        file.puts line
+      end
+      File.open("#{answers_for_attempt_path}/learner_answers.sql", "a") do |file|
+        sql_matches = sql_column.match(/INSERT INTO.+RETURNING "id"/)
+        file.puts "#{sql_matches[0]};"
+      end
+    end
+  end
+
+  def parse_insert_learner_answers_column_name_value_pairs(insert_name_value_pairs)
+    column_name_value_pairs = {}
+
+    segments = insert_name_value_pairs.split("], [")
+    segments[0] = segments[0][1...segments[0].size]
+    segments[segments.size-1] = segments[segments.size-1][0...segments[segments.size-1].size-1]
+
+    segments.each do |segment|
+      split_index = segment.index(", ")
+      key = segment[0...split_index].gsub('"', "")
+      value = segment[split_index+2...segment.size].chomp
+      coalesced_value = nil
+
+      coalesced_value = if key == "value"
+                          value[1..-2]
+      elsif key == "correct"
+        value == "true"
+      elsif key == "quiz_attempt_id"
+        value.to_i
+      elsif key == "question_id"
+        value.to_i
+      elsif key == "created_at"
+        Time.parse(value)
+      elsif key == "updated_at"
+        Time.parse(value)
+      end
+
+      column_name_value_pairs[key] = coalesced_value
+    end
+
+    column_name_value_pairs
+  end
+end
+
+ExtractLearnerAnswersByAttempt.new.run!
